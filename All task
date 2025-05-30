@@ -1,0 +1,85 @@
+// === AgentA.cs ===
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Text;
+using System.Threading;
+using System.Collections.Generic;
+
+class AgentA
+{
+    static void Main(string[] args)
+    {
+        Process.GetCurrentProcess().ProcessorAffinity = (IntPtr)0x2;
+        string directoryPath = args.Length > 0 ? args[0] : @"C:\\TextFiles\\AgentA";
+        Thread t = new Thread(() => ProcessFiles(directoryPath, "agent1"));
+        t.Start();
+    }
+
+    static void ProcessFiles(string dirPath, string pipeName)
+    {
+        var files = Directory.GetFiles(dirPath, "*.txt");
+        foreach (var file in files)
+        {
+            Dictionary<string, int> wordCount = new();
+            foreach (var line in File.ReadAllLines(file))
+            {
+                foreach (var word in line.Split(' ', StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var w = word.Trim().ToLower();
+                    wordCount[w] = wordCount.GetValueOrDefault(w, 0) + 1;
+                }
+            }
+            using var pipe = new NamedPipeClientStream(".", pipeName, PipeDirection.Out);
+            pipe.Connect();
+            using var writer = new StreamWriter(pipe) { AutoFlush = true };
+            foreach (var kv in wordCount)
+                writer.WriteLine($"{Path.GetFileName(file)};{kv.Key};{kv.Value}");
+        }
+    }
+}
+
+// === AgentB.cs ===
+// (Identical to AgentA.cs, change Main directoryPath and pipeName to "C:\\TextFiles\\AgentB" and "agent2")
+
+// === Master.cs ===
+using System;
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Pipes;
+using System.Threading;
+
+class Master
+{
+    static ConcurrentDictionary<string, ConcurrentDictionary<string, int>> index = new();
+
+    static void Main(string[] args)
+    {
+        Process.GetCurrentProcess().ProcessorAffinity = (IntPtr)0x4;
+        foreach (var pipe in new[] { "agent1", "agent2" })
+            new Thread(() => Listen(pipe)).Start();
+    }
+
+    static void Listen(string pipeName)
+    {
+        using var server = new NamedPipeServerStream(pipeName, PipeDirection.In);
+        server.WaitForConnection();
+        using var reader = new StreamReader(server);
+        string line;
+        while ((line = reader.ReadLine()) != null)
+        {
+            var parts = line.Split(';');
+            if (parts.Length != 3) continue;
+            string file = parts[0], word = parts[1];
+            int count = int.Parse(parts[2]);
+            var fileDict = index.GetOrAdd(file, _ => new());
+            fileDict.AddOrUpdate(word, count, (_, old) => old + count);
+        }
+
+        foreach (var (file, words) in index)
+            foreach (var (word, cnt) in words)
+                Console.WriteLine($"{file}:{word}:{cnt}");
+    }
+}
